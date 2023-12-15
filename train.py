@@ -169,7 +169,7 @@ for images,labels in testloader:
     accuracy = matches.mean()
     test_accuracy += accuracy
 
-nd_time = time.time()
+end_time = time.time()
 print('Validation ended.')
 validation_time = end_time - start_time
 print('Validation time: {:.0f}m {:.0f}s'.format(validation_time / 60, validation_time % 60))
