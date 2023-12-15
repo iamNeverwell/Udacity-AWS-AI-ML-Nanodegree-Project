@@ -1,217 +1,200 @@
-import argparse
 import torch
-from collections import OrderedDict
-from os.path import isdir
+import numpy as np
 from torch import nn
 from torch import optim
+import torch.nn.functional as F
 from torchvision import datasets, transforms, models
+import json
+from collections import OrderedDict
+import time
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
 
-def arg_parser():
-    parser = argparse.ArgumentParser(description="Train.py")
-    parser.add_argument('--arch', dest="arch", action="store", default="vgg16", type=str)
-    parser.add_argument('--save_dir', dest="save_dir", action="store", default="./checkpoint.pth")
-    parser.add_argument('--learning_rate', dest="learning_rate", action="store", default=0.001)
-    parser.add_argument('--hidden_units', type=int, dest="hidden_units", action="store", default=120)
-    parser.add_argument('--epochs', dest="epochs", action="store", type=int, default=1)
-    parser.add_argument('--gpu', dest="gpu", action="store", default="gpu")
-    args = parser.parse_args()
-    return args
+data_dir = 'flowers'
+print(data_dir)
+train_dir = data_dir + '/train'
+print(train_dir)
+valid_dir = data_dir + '/valid'
+print(valid_dir)
+test_dir = data_dir + '/test'
+print(test_dir)
 
-def train_transformer(train_dir):
-    train_transforms = transforms.Compose([transforms.RandomRotation(30),
-                                           transforms.RandomResizedCrop(224),
-                                           transforms.RandomHorizontalFlip(),
-                                           transforms.ToTensor(),
-                                           transforms.Normalize([0.485, 0.456, 0.406], 
-                                                                [0.229, 0.224, 0.225])])
-    train_data = datasets.ImageFolder(train_dir, transform=train_transforms)
-    return train_data
+train_transforms = transforms.Compose([transforms.RandomRotation(30),
+                                       transforms.RandomResizedCrop(224),
+                                       transforms.RandomHorizontalFlip(),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize([0.485, 0.456, 0.406], 
+                                                            [0.229, 0.224, 0.225])])
+valid_transforms = transforms.Compose([transforms.Resize(256),
+                                      transforms.CenterCrop(224),
+                                      transforms.ToTensor(),
+                                      transforms.Normalize([0.485, 0.456, 0.406], 
+                                                           [0.229, 0.224, 0.225])
+                                     ])
+test_transforms = transforms.Compose([transforms.Resize(256),
+                                      transforms.CenterCrop(224),
+                                      transforms.ToTensor(),
+                                      transforms.Normalize([0.485, 0.456, 0.406], 
+                                                           [0.229, 0.224, 0.225])]) 
 
-def test_transformer(test_dir):
-    test_transforms = transforms.Compose([transforms.Resize(256),
-                                          transforms.CenterCrop(224),
-                                          transforms.ToTensor(),
-                                          transforms.Normalize([0.485, 0.456, 0.406], 
-                                                               [0.229, 0.224, 0.225])])
-    test_data = datasets.ImageFolder(test_dir, transform=test_transforms)
-    return test_data
+train_data = datasets.ImageFolder(data_dir + '/train', transform=train_transforms)
+print(train_data)
+test_data = datasets.ImageFolder(data_dir + '/test', transform=test_transforms)
+print(test_data)
+valid_data = datasets.ImageFolder(data_dir + '/valid', transform=test_transforms)
+print(valid_data)
 
-def data_loader(data, train=True):
-    if train: 
-        loader = torch.utils.data.DataLoader(data, batch_size=50, shuffle=True)
-    else: 
-        loader = torch.utils.data.DataLoader(data, batch_size=50)
-    return loader
+trainloader = torch.utils.data.DataLoader(train_data, batch_size=64, shuffle=True)
+testloader = torch.utils.data.DataLoader(test_data, batch_size=32)
+validloader = torch.utils.data.DataLoader(valid_data, batch_size=32)
 
-def check_gpu(gpu_arg):
-    if not gpu_arg:
-        return torch.device("cpu")
-    
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
-    if device == "cpu":
-        print("CUDA was not found on device, using CPU instead.")
-    return device
+image_datasets = [train_data, valid_data, test_data]
+dataloaders = [trainloader, validloader, testloader]
 
-def primaryloader_model(architecture="vgg16"):
-    model = models.vgg16(pretrained=True)
-    model.name = "vgg16"
-    
-    for param in model.parameters():
-        param.requires_grad = False 
-    return model
+with open('cat_to_name.json', 'r') as f:
+    cat_to_name = json.load(f)
 
-def initial_classifier(model, hidden_units):
-    classifier = nn.Sequential(OrderedDict([
-        ('inputs', nn.Linear(25088, hidden_units)),
-        ('relu1', nn.ReLU()),
-        ('dropout', nn.Dropout(0.5)),
-        ('hidden_layer1', nn.Linear(hidden_units, 90)),
-        ('relu2', nn.ReLU()),
-        ('hidden_layer2', nn.Linear(90, 70)),
-        ('relu3', nn.ReLU()),
-        ('hidden_layer3', nn.Linear(70, 102)),
-        ('output', nn.LogSoftmax(dim=1))
-    ]))
-    model.classifier = classifier
-    return classifier
+    print(cat_to_name)
 
-def validation(model, testloader, criterion, device):
-    test_loss = 0
-    accuracy = 0
-    
-    for ii, (inputs, labels) in enumerate(testloader):
-        inputs, labels = inputs.to(device), labels.to(device)
-        output = model.forward(inputs)
-        test_loss += criterion(output, labels).item()
-        
-        ps = torch.exp(output)
-        equality = (labels.data == ps.max(dim=1)[1])
-        accuracy += equality.type(torch.FloatTensor).mean()
-    return test_loss, accuracy
+no_output_categories = len(cat_to_name)
 
-def network_trainer(Model, Trainloader, Testloader, Device, 
-                  Criterion, Optimizer, Epochs, Print_every, Steps):
-    if type(Epochs) == type(None):
-        Epochs = 12
-        print("Number of Epochs specified as 12.")    
-    
-    print("Training process initializing .....\n")
+hidden_units = 4096
+model = models.vgg16_bn(pretrained=True)
+for param in model.parameters():
+    param.requires_grad = False
 
-    for e in range(Epochs):
-        running_loss = 0
-        Model.train() 
-        
-        for ii, (inputs, labels) in enumerate(Trainloader):
-            Steps += 1
-            inputs, labels = inputs.to(Device), labels.to(Device)
-            
-            Optimizer.zero_grad()
-            outputs = Model.forward(inputs)
-            loss = Criterion(outputs, labels)
-            loss.backward()
-            Optimizer.step()
-        
-            running_loss += loss.item()
-        
-            if Steps % Print_every == 0:
-                Model.eval()
+model.classifier
 
-                with torch.no_grad():
-                    valid_loss, accuracy = validation(Model, Testloader, Criterion, Device)
-            
-                print("Epoch: {}/{} | ".format(e+1, Epochs),
-                      "Training Loss: {:.4f} | ".format(running_loss/Print_every),
-                      "Validation Loss: {:.4f} | ".format(valid_loss/len(Testloader)),
-                      "Validation Accuracy: {:.4f}".format(accuracy/len(Testloader)))
-            
-                running_loss = 0
-                Model.train()
+classifier = nn.Sequential(OrderedDict([
+                          ('fc1', nn.Linear(25088, hidden_units)),
+                          ('relu', nn.ReLU()),
+                          ('dropout1', nn.Dropout(0.05)),
+                          ('fc2', nn.Linear(hidden_units, no_output_categories)),
+                          ('output', nn.LogSoftmax(dim=1))
+                          ]))
 
-    return Model
+model.classifier = classifier
 
-def validate_model(Model, Testloader, Device):
-    correct, total = 0, 0
-    with torch.no_grad():
-        Model.eval()
-        for data in Testloader:
-            images, labels = data
-            images, labels = images.to(Device), labels.to(Device)
-            outputs = Model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+model.classifier
 
-    print('Accuracy on test images is: %d%%' % (100 * correct / total))
 
-def initial_checkpoint(Model, Save_Dir, Train_data):
-    if type(Save_Dir) == type(None):
-        print("Model checkpoint directory not specified, model will not be saved.")
-    else:
-        if isdir(Save_Dir):
-            Model.class_to_idx = Train_data.class_to_idx
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+model.to(device)
+print(f'The device in use is {device}.\n')
 
-            torch.save({'structure' :'alexnet',
-                        'hidden_layer1':120,
-                         'dropout':0.5,
-                         'epochs':12,
-                         'state_dict':Model.state_dict(),
-                         'class_to_idx':Model.class_to_idx,
-                         'optimizer_dict':Optimizer.state_dict()},
-                         'checkpoint.pth')
-            Model.class_to_idx = Train_data.class_to_idx
-            
-            checkpoint = {'architecture': Model.name,
-                          'classifier': Model.classifier,
-                          'class_to_idx': Model.class_to_idx,
-                          'state_dict': Model.state_dict()}
-            
-            torch.save(checkpoint, 'my_checkpoint.pth')
-        else: 
-            print("Directory not found, model will not be saved.")
 
-def main():
-    args = arg_parser()
-    
-    data_dir = 'flowers'
-    train_dir = data_dir + '/train'
-    valid_dir = data_dir + '/valid'
-    test_dir = data_dir + '/test'
-    
-    train_data = train_transformer(train_dir)
-    valid_data = train_transformer(valid_dir)
-    test_data = test_transformer(test_dir)
-    
-    trainloader = data_loader(train_data)
-    validloader = data_loader(valid_data, train=False)
-    testloader = data_loader(test_data, train=False)
-    
-    model = primaryloader_model(architecture=args.arch)
-    
-    model.classifier = initial_classifier(model, hidden_units=args.hidden_units)
-    
-    device = check_gpu(gpu_arg=args.gpu)
-    model.to(device)
-    
-    if type(args.learning_rate) == type(None):
-        learning_rate = 0.001
-        print("Learning rate specified as 0.001")
-    else:
-        learning_rate = args.learning_rate
-    
-    criterion = nn.NLLLoss()
-    optimizer = optim.Adam(model.classifier.parameters(), lr=learning_rate)
-    
-    print_every = 30
-    steps = 0
-    
-    trained_model = network_trainer(model, trainloader, validloader, device, criterion, optimizer, args.epochs, print_every, steps)
-    
-    print("\nTraining process is completed!!")
-    
-    validate_model(trained_model, testloader, device)
+epochs = 10
+optimizer = optim.Adam(model.classifier.parameters(),lr=.001)
+criterion = nn.NLLLoss()
+
+print_every = 20
+
+running_loss = running_accuracy = 0
+validation_losses, training_losses = [],[]
+
+
+for e in range(epochs):
+    batches = 0
+
+    model.train()
+
+    for images,labels in trainloader:
+        start = time.time() 
+        batches += 1
+
+        images,labels = images.to(device),labels.to(device)
+
+        log_ps = model.forward(images)
+        loss = criterion(log_ps,labels)
+        loss.backward()
+        optimizer.step()
+
+        ps = torch.exp(log_ps)
+        top_ps, top_class = ps.topk(1,dim=1)
+        matches = (top_class == labels.view(*top_class.shape)).type(torch.FloatTensor)
+        accuracy = matches.mean()
+
+        optimizer.zero_grad()
+        running_loss += loss.item()
+        running_accuracy += accuracy.item()
+
+        if batches%print_every == 0:
+            end = time.time()
+            training_time = end-start
+            start = time.time()
+
+            validation_loss = 0
+            validation_accuracy = 0
+
+            model.eval()
+            with torch.no_grad():
+                for images,labels in validloader:
+                    images,labels = images.to(device),labels.to(device)
+                    log_ps = model.forward(images)
+                    loss = criterion(log_ps,labels)
+                    ps = torch.exp(log_ps)
+                    top_ps, top_class = ps.topk(1,dim=1)
+                    matches = (top_class == \
+                                labels.view(*top_class.shape)).type(torch.FloatTensor)
+                    accuracy = matches.mean()
+
+                    validation_loss += loss.item()
+                    validation_accuracy += accuracy.item()
+      
+            end = time.time()
+            validation_time = end-start
+            validation_losses.append(running_loss/print_every)
+            training_losses.append(validation_loss/len(validloader))
+                
+            print(f'Epoch {e+1}/{epochs} | Batch {batches}')
+            print(f'Running Training Loss: {running_loss/print_every:.3f}')
+            print(f'Running Training Accuracy: {running_accuracy/print_every*100:.2f}%')
+            print(f'Validation Loss: {validation_loss/len(validloader):.3f}')
+            print(f'Validation Accuracy: {validation_accuracy/len(validloader)*100:.2f}%')
+
+            running_loss = running_accuracy = 0
+            model.train()
+
+test_accuracy = 0
+start_time = time.time()
+print('Validation started.')
+for images,labels in testloader:
+    model.eval()
+    images,labels = images.to(device),labels.to(device)
+    log_ps = model.forward(images)
+    ps = torch.exp(log_ps)
+    top_ps,top_class = ps.topk(1,dim=1)
+    matches = (top_class == labels.view(*top_class.shape)).type(torch.FloatTensor)
+    accuracy = matches.mean()
+    test_accuracy += accuracy
+
+nd_time = time.time()
+print('Validation ended.')
+validation_time = end_time - start_time
+print('Validation time: {:.0f}m {:.0f}s'.format(validation_time / 60, validation_time % 60))
+
+print(f'Test Accuracy: {test_accuracy/len(testloader)*100:.2f}%')
+
+destination_directory = None
+class_to_idx = train_data.class_to_idx
+
+def save_model(trained_model,hidden_units,output_units,destination_directory,model_arch,class_to_idx):
    
-    initial_checkpoint(trained_model, args.save_dir, train_data)
+    model_checkpoint = {'model_arch':model_arch, 
+                    'clf_input':25088,
+                    'clf_output':output_units,
+                    'clf_hidden':hidden_units,
+                    'state_dict':trained_model.state_dict(),
+                    'model_class_to_index':class_to_idx,
+                    }
+    
+    if destination_directory:
+        torch.save(model_checkpoint,destination_directory+"/"+model_arch+"_checkpoint.pth")
+        print(f"{model_arch} successfully saved to {destination_directory}")
+    else:
+        torch.save(model_checkpoint,model_arch+"_checkpoint.pth")
+        print(f"{model_arch} successfully saved to current directory as {model_arch}_checkpoint.pth")
 
-if __name__ == '__main__':
-    main()
+save_model(model,hidden_units,no_output_categories,destination_directory,'vgg16_bn',class_to_idx)
+
